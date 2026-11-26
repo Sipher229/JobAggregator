@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, selectinload
@@ -118,7 +118,7 @@ class CandidateIndex:
 # --------------------------------------------------------------------------- #
 _COPY_FIELDS = ("title", "noc_code", "teer_category", "city", "province", "wage_raw",
                 "employment_type", "employment_term", "language_req", "url", "posted_at",
-                "source_detail", "job_number", "postal_code", "vacancies", "work_mode")
+                "source_detail", "job_number", "postal_code", "vacancies", "work_mode", "expires_at")
 
 
 def upsert_jobs(session: Session, jobs: Iterable[JobPostingIn], index: CandidateIndex,
@@ -175,7 +175,13 @@ def upsert_jobs(session: Session, jobs: Iterable[JobPostingIn], index: Candidate
         post.match_score = round(result.score, 1) if result.score else None
         post.match_reason = result.reason
         post.dedupe_hash = h
-        post.is_active = True
+        if is_expired(post.expires_at, run_started):
+            # Still listed but past its "Advertised until" date.
+            if post.is_active or post.closed_reason != "expired":
+                post.closed_at = run_started
+            post.is_active, post.closed_reason = False, "expired"
+        else:
+            post.is_active, post.closed_at, post.closed_reason = True, None, None
         post.last_seen_at = run_started
         if job.details_fetched:
             post.details_fetched_at = run_started
@@ -210,29 +216,62 @@ def deactivate_unseen(session: Session, source: JobSource, run_started: datetime
         q = q.where(JobPosting.community_id.in_(ids))
     if employer_ids is not None:
         q = q.where(JobPosting.employer_id.in_(list(employer_ids)))
-    result = session.execute(q.values(is_active=False).execution_options(synchronize_session=False))
+    result = session.execute(q.values(is_active=False, closed_at=run_started, closed_reason="not_seen")
+                             .execution_options(synchronize_session=False))
     session.expire_all()
     return result.rowcount or 0
 
 
 def mark_expired(session: Session, source: JobSource, external_ids: Iterable[str]) -> int:
+    """Postings whose detail page is gone (404 / 'no longer available')."""
     ids = list(external_ids)
     if not ids:
         return 0
     result = session.execute(
         update(JobPosting).where(JobPosting.source == source, JobPosting.external_id.in_(ids))
-        .values(is_active=False).execution_options(synchronize_session=False))
+        .values(is_active=False, closed_at=utcnow(), closed_reason="removed")
+        .execution_options(synchronize_session=False))
     return result.rowcount or 0
 
 
+def is_expired(expires_at: datetime | None, now: datetime | None = None) -> bool:
+    """'Advertised until 2026-12-17' is valid through that whole day."""
+    if expires_at is None:
+        return False
+    now = now or utcnow()
+    if expires_at.tzinfo is None:  # SQLite returns naive datetimes
+        expires_at = expires_at.replace(tzinfo=now.tzinfo)
+    return now >= expires_at + timedelta(days=1)
+
+
+def close_expired(session: Session, now: datetime | None = None) -> int:
+    """Close active postings past their 'Advertised until' date (no network)."""
+    now = now or utcnow()
+    cutoff = now - timedelta(days=1)
+    result = session.execute(
+        update(JobPosting).where(JobPosting.is_active.is_(True), JobPosting.expires_at.is_not(None),
+                                 JobPosting.expires_at <= cutoff)
+        .values(is_active=False, closed_at=now, closed_reason="expired")
+        .execution_options(synchronize_session=False))
+    session.expire_all()
+    return result.rowcount or 0
+
+
+DETAIL_REFRESH_DAYS = 7
+
+
 def needs_detail(session: Session, source: JobSource, external_ids: Iterable[str]) -> set[str]:
-    """External ids that have never had their detail page fetched."""
+    """External ids whose detail page should be fetched: never fetched, or fetched
+    over DETAIL_REFRESH_DAYS ago without an expiry date (backfills rows stored
+    before expiry dates were captured; postings without one are rechecked weekly)."""
     ids = list(external_ids)
     if not ids:
         return set()
+    stale = utcnow() - timedelta(days=DETAIL_REFRESH_DAYS)
     done = set(session.scalars(select(JobPosting.external_id).where(
         JobPosting.source == source, JobPosting.external_id.in_(ids),
-        JobPosting.details_fetched_at.is_not(None))))
+        JobPosting.details_fetched_at.is_not(None),
+        (JobPosting.expires_at.is_not(None)) | (JobPosting.details_fetched_at >= stale))))
     return set(ids) - done
 
 
@@ -279,7 +318,8 @@ def rematch_jobs(session: Session, *, active_only: bool = True) -> dict[str, int
         post.dedupe_hash = dedupe_hash(employer_id, post.title, post.city)
         post.community_id = community_ids.get(result.community_slug) if result.community_slug else None
         if post.community_id is None:
-            post.is_active = False  # no longer inside any pilot boundary
+            # no longer inside any pilot boundary
+            post.is_active, post.closed_at, post.closed_reason = False, utcnow(), "outside_boundary"
         changed[result.status] += 1
     session.flush()
     return changed

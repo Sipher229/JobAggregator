@@ -25,6 +25,7 @@ from core.job_sync import (
     CandidateIndex,
     JobSyncStats,
     active_job_counts,
+    close_expired,
     deactivate_unseen,
     load_candidates,
     mark_expired,
@@ -37,11 +38,14 @@ from core.models import (
     DesignationStatus,
     Employer,
     EmployerCommunity,
+    JobPosting,
     JobSource,
+    MatchStatus,
     RunStatus,
     ScrapeRun,
     utcnow,
 )
+from core.schemas import JobPostingIn
 from scrapers.base import HttpClient, HttpConfig, ScrapeError
 from core.employer_sync import clean_employer_websites
 from scrapers.jobs.career_site import PERMANENT_ERRORS, CareerSiteScraper, EmployerTarget
@@ -249,6 +253,62 @@ async def sync_external(session: Session, http: HttpClient, communities: list[Co
     return summary
 
 
+async def refresh_job_bank_details(session: Session, http: HttpClient, *, limit: int | None = None,
+                                   only_missing_expiry: bool = True) -> JobSyncStats:
+    """Re-read detail pages of stored, active matched/review Job Bank postings.
+
+    Fills NOC/language/terms and the 'Advertised until' date without re-running
+    searches, and closes postings whose page is gone (404 / 'no longer available').
+    """
+    q = (select(JobPosting)
+         .where(JobPosting.source == JobSource.JOB_BANK, JobPosting.is_active.is_(True),
+                JobPosting.match_status.in_([MatchStatus.MATCHED, MatchStatus.NEEDS_REVIEW]))
+         .order_by(JobPosting.match_status, JobPosting.posted_at.desc()))
+    if only_missing_expiry:
+        q = q.where(JobPosting.expires_at.is_(None))
+    posts = list(session.scalars(q.limit(limit) if limit else q))
+    run = _start(session, "refresh_details:job_bank", f"{len(posts)} postings")
+    stats = JobSyncStats(found=len(posts))
+    jb = JobBankScraper(http)
+    index = CandidateIndex(load_candidates(session))
+    now = utcnow()
+    expired: list[str] = []
+    for post in posts:
+        listing = JobPostingIn(source=JobSource.JOB_BANK, external_id=post.external_id, title=post.title,
+                               employer_name=post.employer_name_raw or "", city=post.city,
+                               province=post.province, url=post.url, posted_at=post.posted_at,
+                               wage_raw=post.wage_raw, source_detail=post.source_detail,
+                               job_number=post.job_number, work_mode=post.work_mode)
+        try:
+            detailed, gone = await jb.fetch_detail(listing)
+        except ScrapeError as exc:
+            logger.warning("refresh-details %s failed: %s", post.external_id, exc)
+            continue
+        if gone:
+            expired.append(post.external_id)
+            continue
+        # keep the posting's original last_seen (a detail read isn't a listing sighting)
+        last_seen = post.last_seen_at
+        upsert_jobs(session, [detailed], index, run_started=now, stats=stats)
+        post.last_seen_at = last_seen
+        session.commit()
+    stats.deactivated += mark_expired(session, JobSource.JOB_BANK, expired)
+    stats.deactivated += close_expired(session)
+    stats.found = len(posts)  # upsert_jobs also counts into `found`
+    _finish(run, stats)
+    session.commit()
+    return stats
+
+
+def run_refresh_details(session: Session, limit: int | None = None, all_postings: bool = False,
+                        http_config: HttpConfig | None = None) -> JobSyncStats:
+    async def main():
+        async with HttpClient(http_config) as http:
+            return await refresh_job_bank_details(session, http, limit=limit,
+                                                  only_missing_expiry=not all_postings)
+    return asyncio.run(main())
+
+
 def run_job_sync(session: Session, slugs: list[str] | None = None,
                  opts: JobSyncOptions | None = None,
                  http_config: HttpConfig | None = None) -> dict[str, JobSyncStats]:
@@ -264,6 +324,11 @@ def run_job_sync(session: Session, slugs: list[str] | None = None,
                 summary |= await sync_career_sites(session, http, slugs, opts)
             if "external" in opts.sources:
                 summary |= await sync_external(session, http, communities)
+        closed = close_expired(session)
+        session.commit()
+        summary["expired"] = JobSyncStats(deactivated=closed)
+        if closed:
+            logger.info("closed %d postings past their 'Advertised until' date", closed)
         return summary
 
     return asyncio.run(main())

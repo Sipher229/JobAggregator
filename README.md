@@ -208,3 +208,39 @@ python cli.py sync-jobs          # Job Bank + career sites
 python cli.py export -f xlsx -f pdf
 python cli.py status             # recent runs and totals
 ```
+
+## Posting age and expiry
+
+Every posting stores `posted_at` (the date Job Bank shows), `first_seen_at`,
+`last_seen_at` and, from the detail page or JSON-LD `validThrough`,
+`expires_at` ("Advertised until").
+
+Postings are closed (`is_active = False`) with a `closed_reason`:
+
+| Reason | When |
+|---|---|
+| `expired` | past "Advertised until" (checked at every sync, by `refresh-details`, and again at export time) |
+| `removed` | the detail page returns 404 / "no longer available" |
+| `not_seen` | missing from a fully successful search of its community |
+| `outside_boundary` | its city is no longer inside any pilot boundary (`rematch`) |
+
+Reports add **Days Up**, **Advertised Until**, **Last Verified** and a
+**Freshness** flag (`core/freshness.py`):
+
+| Flag | Meaning |
+|---|---|
+| `unverified` | not seen in a search for more than 3 days (e.g. the last search failed), so it may be gone |
+| `expiring soon` | 7 days or less left |
+| `stale` | posted more than 60 days ago (`--stale-days`); often filled but still listed |
+| `no expiry date` | detail page not read yet, or the source doesn't publish one |
+| `ok` | none of the above |
+
+```powershell
+python cli.py export -f xlsx --max-age 30         # only postings up 30 days or less
+python cli.py export -f pdf --stale-days 45
+python cli.py refresh-details                     # re-read detail pages lacking an expiry date
+python cli.py jobs -c timmins                     # listing shows days up + flags
+```
+
+The Summary tab counts stale/unverified postings per community. Detail pages are
+re-read when an expiry date is still missing a week later.

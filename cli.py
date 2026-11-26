@@ -9,6 +9,7 @@
                             [--max-details N] [--no-details] [--career-limit N]
     python cli.py jobs [--community SLUG] [--status matched|needs_review|unmatched|all]
     python cli.py rematch
+    python cli.py refresh-details [--limit N] [--all]
     python cli.py export --format csv|xlsx|pdf [--program FCIP|RCIP|ALL] [--community SLUG]
                          [--lang fr|en|all] [--include-review] [--output-dir DIR]
     python cli.py schedule [--jobs-cron "0 6 * * *"] [--employers-cron "0 4 * * 1"] [--run-now]
@@ -152,6 +153,21 @@ def sync_jobs(
                    f"{st.needs_review:>8}{st.deactivated:>8}  {'; '.join(st.warnings)}")
 
 
+@app.command("refresh-details")
+def refresh_details(
+    limit: Annotated[int | None, typer.Option(help="Max detail pages (5 s each)")] = None,
+    all_postings: Annotated[bool, typer.Option(
+        "--all", help="Re-read every active matched/review posting, not only those without an expiry date")] = False,
+) -> None:
+    """Re-read Job Bank detail pages of stored postings: fills 'Advertised until',
+    NOC/language/terms, and closes postings that were removed. No searches."""
+    from scrapers.jobs.runner import run_refresh_details
+
+    with session_scope() as s:
+        st = run_refresh_details(s, limit=limit, all_postings=all_postings)
+    typer.echo(f"checked {st.found}, updated {st.updated}, closed {st.deactivated}")
+
+
 @app.command()
 def rematch() -> None:
     """Re-link stored postings to designated employers (no network; run after sync-employers)."""
@@ -168,7 +184,8 @@ def jobs(
     status: Annotated[str, typer.Option(help="matched, needs_review, unmatched or all")] = "matched",
     limit: Annotated[int, typer.Option()] = 50,
 ) -> None:
-    """Show active job postings stored in the database."""
+    """Show active job postings stored in the database (with days up and freshness flags)."""
+    from core.freshness import assess_posting
     from core.models import JobPosting, MatchStatus
 
     with session_scope() as s:
@@ -183,10 +200,13 @@ def jobs(
             q = q.where(JobPosting.match_status == MatchStatus(status))
         rows = s.execute(q.limit(limit)).all()
         for post, emp, slug in rows:
+            fresh = assess_posting(post)
             date = post.posted_at.date().isoformat() if post.posted_at else "          "
+            age = f"{fresh.days_up:>3}d" if fresh.days_up is not None else "   ?"
+            flag = "" if fresh.flag in ("ok", "no expiry date") else f" [{fresh.flag}]"
             noc = f"NOC {post.noc_code}/T{post.teer_category}" if post.noc_code else ""
-            typer.echo(f"{date} {slug or '-':<22} {post.title[:38]:<38} | {(emp or post.employer_name_raw or '')[:30]:<30}"
-                       f" | {post.city or ''} {noc} {post.language_req or ''} [{post.source}]")
+            typer.echo(f"{date} {age} {slug or '-':<22} {post.title[:36]:<36} | {(emp or post.employer_name_raw or '')[:28]:<28}"
+                       f" | {post.city or ''} {noc} {post.language_req or ''} [{post.source}]{flag}")
     typer.echo(f"\n{len(rows)} postings shown")
 
 
@@ -211,15 +231,22 @@ def export(
     lang: Annotated[LangOpt, typer.Option("--lang", "-l", case_sensitive=False)] = LangOpt.ALL,
     include_review: Annotated[bool, typer.Option(
         "--include-review", help="Also export postings whose employer match needs review")] = False,
+    max_age: Annotated[int | None, typer.Option(
+        "--max-age", help="Only postings up for at most this many days")] = None,
+    stale_days: Annotated[int, typer.Option(
+        "--stale-days", help="Flag postings older than this as stale")] = 60,
     output_dir: Annotated[Path | None, typer.Option("--output-dir", "-o", file_okay=False)] = None,
 ) -> None:
-    """Export active postings + employer directory + summary as CSV / XLSX / PDF."""
+    """Export active postings + employer directory + summary as CSV / XLSX / PDF.
+
+    Postings past their 'Advertised until' date are never exported; the
+    Freshness column flags stale / unverified / expiring-soon postings."""
     from core.exporter import ReportFilter
     from core.exporter import export as run_export
 
     try:
         flt = ReportFilter(program=program.value, community=community, lang=lang.value,
-                           include_review=include_review)
+                           include_review=include_review, max_age=max_age, stale_days=stale_days)
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
     formats = [f.value for f in (fmt or [FormatOpt.XLSX])]

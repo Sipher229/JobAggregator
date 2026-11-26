@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 
 from config.communities import COMMUNITIES_BY_SLUG, Program
 from core.database import PROJECT_ROOT
+from core.freshness import STALE_DAYS, assess_posting
 from core.models import (
     Community,
     CommunityProgram,
@@ -57,6 +58,8 @@ class ReportFilter:
     community: str | None = None
     lang: str = "all"             # fr | en | all
     include_review: bool = False
+    max_age: int | None = None    # only postings up at most this many days
+    stale_days: int = STALE_DAYS  # "stale" flag threshold
 
     def __post_init__(self):
         if self.program.upper() not in ("FCIP", "RCIP", "ALL"):
@@ -65,6 +68,8 @@ class ReportFilter:
             raise ValueError(f"lang must be fr, en or all, not {self.lang!r}")
         if self.community and self.community not in COMMUNITIES_BY_SLUG:
             raise ValueError(f"unknown community {self.community!r}")
+        if self.max_age is not None and self.max_age < 0:
+            raise ValueError("max_age must be >= 0")
 
     @property
     def programs(self) -> set[Program]:
@@ -76,18 +81,21 @@ class ReportFilter:
                  f"Language: {self.lang}"]
         if self.include_review:
             parts.append("includes matches needing review")
+        if self.max_age is not None:
+            parts.append(f"posted within {self.max_age} days")
         return " | ".join(parts)
 
     def slug(self) -> str:
         return "_".join([self.program.lower(), self.community or "all", self.lang]
-                        + (["review"] if self.include_review else []))
+                        + (["review"] if self.include_review else [])
+                        + ([f"max{self.max_age}d"] if self.max_age is not None else []))
 
 
 JOB_COLUMNS = [
     "Province", "Community", "Programs", "Employer", "Designation Status", "Priority Sector",
     "Job Title", "NOC", "TEER", "Language", "Employment Type", "Employment Term", "City",
-    "Wage", "Vacancies", "Posted", "Source", "Original Board", "Match", "Match Score", "URL",
-    "Last Seen",
+    "Wage", "Vacancies", "Posted", "Days Up", "Advertised Until", "Freshness", "Source",
+    "Original Board", "Match", "Match Score", "URL", "Last Verified",
 ]
 EMPLOYER_COLUMNS = [
     "Province", "Community", "Program", "Employer", "Operating Name", "Status", "Priority Sector",
@@ -96,7 +104,8 @@ EMPLOYER_COLUMNS = [
 ]
 SUMMARY_COLUMNS = [
     "Province", "Community", "Program", "Designated Employers", "Hiring", "Not Hiring",
-    "Employers With Active Jobs", "Active Jobs", "French/Bilingual Jobs", "Jobs Needing Review",
+    "Employers With Active Jobs", "Active Jobs", "French/Bilingual Jobs", "Stale/Unverified Jobs",
+    "Jobs Needing Review",
 ]
 
 
@@ -142,20 +151,28 @@ def build_report(session: Session, flt: ReportFilter) -> Report:
           .where(JobPosting.is_active.is_(True), JobPosting.match_status.in_(statuses)))
     if flt.community:
         jq = jq.where(Community.slug == flt.community)
-    # (employer, community) -> (matched ids, review ids, french/bilingual matched ids).
-    # Sets, so totals count distinct postings even when an employer is designated
-    # under both pilots.
-    job_ids: dict[tuple[int, int], tuple[set, set, set]] = defaultdict(lambda: (set(), set(), set()))
+    # (employer, community) -> (matched ids, review ids, french/bilingual matched ids,
+    # stale/unverified matched ids). Sets, so totals count distinct postings even
+    # when an employer is designated under both pilots.
+    job_ids: dict[tuple[int, int], tuple[set, set, set, set]] = defaultdict(
+        lambda: (set(), set(), set(), set()))
     for post, employer, community in session.execute(jq).all():
         des = [d for d in designations.get((employer.id, community.id), [])
                if d[1] != DesignationStatus.REVOKED]
         if not des:
             continue  # employer not designated under the requested program(s) here
-        matched, review, french = job_ids[(employer.id, community.id)]
+        fresh = assess_posting(post, now=report.generated_at, stale_days=flt.stale_days)
+        if fresh.flag == "expired":
+            continue  # past "Advertised until" even if no sync has closed it yet
+        if flt.max_age is not None and fresh.days_up is not None and fresh.days_up > flt.max_age:
+            continue
+        matched, review, french, stale = job_ids[(employer.id, community.id)]
         if post.match_status == MatchStatus.MATCHED:
             matched.add(post.id)
             if post.language_req in _LANG_OK["fr"]:
                 french.add(post.id)
+            if fresh.flag in ("stale", "unverified"):
+                stale.add(post.id)
         else:
             review.add(post.id)
         if not _lang_ok(post.language_req, flt.lang):
@@ -176,24 +193,27 @@ def build_report(session: Session, flt: ReportFilter) -> Report:
             "City": post.city or "",
             "Wage": post.wage_raw or "",
             "Vacancies": post.vacancies or "",
-            "Posted": _date(post.posted_at),
+            "Posted": _date(post.posted_at or post.first_seen_at),
+            "Days Up": "" if fresh.days_up is None else fresh.days_up,
+            "Advertised Until": _date(post.expires_at),
+            "Freshness": fresh.flag,
             "Source": post.source.value,
             "Original Board": post.source_detail or "",
             "Match": post.match_status.value,
             "Match Score": post.match_score or "",
             "URL": post.url or "",
-            "Last Seen": _date(post.last_seen_at),
+            "Last Verified": _date(post.last_seen_at),
         })
     report.jobs.sort(key=lambda r: (r["Province"], r["Community"], r["Employer"].lower(),
                                     r["Posted"] or "0"), reverse=False)
 
     # Employers directory (one row per designation)
     summary: dict[tuple[str, str, str], dict] = {}
-    totals_ids: tuple[set, set, set] = (set(), set(), set())
-    empty: tuple[set, set, set] = (set(), set(), set())
+    totals_ids: tuple[set, set, set, set] = (set(), set(), set(), set())
+    empty: tuple[set, set, set, set] = (set(), set(), set(), set())
     for link, program, community, employer in designation_rows:
         ids = job_ids.get((employer.id, community.id), empty)
-        active, review, french = (len(x) for x in ids)
+        active, review, french, stale = (len(x) for x in ids)
         report.employers.append({
             "Province": community.province,
             "Community": community.name,
@@ -222,6 +242,7 @@ def build_report(session: Session, flt: ReportFilter) -> Report:
             s["Employers With Active Jobs"] += 1
         s["Active Jobs"] += active
         s["French/Bilingual Jobs"] += french
+        s["Stale/Unverified Jobs"] += stale
         s["Jobs Needing Review"] += review
         for total_set, these in zip(totals_ids, ids):
             total_set.update(these)
@@ -235,8 +256,9 @@ def build_report(session: Session, flt: ReportFilter) -> Report:
             total[col] = sum(r[col] for r in report.summary)
         # Postings are distinct in the total (a dual-designated employer's job
         # appears under both FCIP and RCIP rows above).
-        total["Active Jobs"], total["Jobs Needing Review"], total["French/Bilingual Jobs"] = (
-            len(totals_ids[0]), len(totals_ids[1]), len(totals_ids[2]))
+        (total["Active Jobs"], total["Jobs Needing Review"], total["French/Bilingual Jobs"],
+         total["Stale/Unverified Jobs"]) = (len(x) for x in (totals_ids[0], totals_ids[1],
+                                                             totals_ids[2], totals_ids[3]))
         report.summary.append(total)
     return report
 
@@ -365,10 +387,11 @@ def write_pdf(report: Report, output_dir: Path | None = None) -> Path:
     # Summary table
     if report.summary:
         cols = ["Province", "Community", "Program", "Designated Employers", "Hiring",
-                "Employers With Active Jobs", "Active Jobs", "French/Bilingual Jobs"]
+                "Employers With Active Jobs", "Active Jobs", "French/Bilingual Jobs",
+                "Stale/Unverified Jobs"]
         data = [[Paragraph(f"<b>{c}</b>", small) for c in cols]]
         data += [[Paragraph(_pdf_text(r[c]), small) for c in cols] for r in report.summary]
-        t = Table(data, repeatRows=1, colWidths=[0.75 * inch, 2.45 * inch] + [1.05 * inch] * 6)
+        t = Table(data, repeatRows=1, colWidths=[0.7 * inch, 2.3 * inch] + [0.95 * inch] * 7)
         t.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE6F1")),
             ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#BBBBBB")),
@@ -383,8 +406,9 @@ def write_pdf(report: Report, output_dir: Path | None = None) -> Path:
     for row in report.jobs:
         grouped[row["Province"]][row["Community"]][row["Employer"]].append(row)
 
-    col_widths = [3.3 * inch, 0.9 * inch, 1.2 * inch, 1.5 * inch, 1.1 * inch, 2.0 * inch]
-    header = ["Job title", "NOC / TEER", "Language", "City", "Source", "Link"]
+    col_widths = [2.9 * inch, 0.85 * inch, 1.0 * inch, 1.25 * inch, 1.4 * inch, 1.1 * inch, 1.5 * inch]
+    header = ["Job title", "NOC / TEER", "Language", "City", "Posted (days up)", "Source", "Link"]
+    flag_colors = {"stale": "#B45F06", "unverified": "#B45F06", "expiring soon": "#7F6000"}
     for prov in sorted(grouped):
         story.append(Paragraph(_pdf_text(PROVINCE_NAMES.get(prov, prov)), h2))
         for community in sorted(grouped[prov]):
@@ -404,9 +428,15 @@ def write_pdf(report: Report, output_dir: Path | None = None) -> Path:
                     link = (f'<link href="{_pdf_text(r["URL"])}" color="#0563C1">view posting</link>'
                             if r["URL"] else "")
                     title = _pdf_text(r["Job Title"]) + (" <i>(review)</i>" if r["Match"] != "matched" else "")
+                    if r["Freshness"] in flag_colors:
+                        title += f' <font color="{flag_colors[r["Freshness"]]}"><b>[{r["Freshness"]}]</b></font>'
+                    posted = r["Posted"] + (f" ({r['Days Up']} d)" if r["Days Up"] != "" else "")
+                    if r["Advertised Until"]:
+                        posted += f"<br/>until {r['Advertised Until']}"
                     data.append([Paragraph(title, small), Paragraph(_pdf_text(noc), small),
                                  Paragraph(_pdf_text(r["Language"]), small), Paragraph(_pdf_text(r["City"]), small),
-                                 Paragraph(_pdf_text(src), small), Paragraph(link, small)])
+                                 Paragraph(posted, small), Paragraph(_pdf_text(src), small),
+                                 Paragraph(link, small)])
                 t = Table(data, colWidths=col_widths, repeatRows=1)
                 t.setStyle(TableStyle([
                     ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEF2F6")),

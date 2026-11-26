@@ -200,6 +200,7 @@ def parse_jsonld_jobs(html: str, page_url: str) -> list[dict]:
                 "city": city, "province": prov, "postal_code": postal,
                 "url": urljoin(page_url, obj.get("url") or "") or page_url,
                 "posted_at": parse_date_any(obj.get("datePosted")),
+                "expires_at": parse_date_any(obj.get("validThrough")),
                 "employment_type": obj.get("employmentType") if isinstance(obj.get("employmentType"), str) else None,
             })
     return jobs
@@ -377,6 +378,7 @@ def _to_job(target: EmployerTarget, raw: dict, ats: str, token: str) -> JobPosti
         postal_code=raw.get("postal_code"),
         url=raw.get("url"),
         posted_at=raw.get("posted_at"),
+        expires_at=raw.get("expires_at"),
         employment_type=raw.get("employment_type"),
         source_detail=ats,
     )

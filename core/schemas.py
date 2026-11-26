@@ -90,6 +90,7 @@ class JobPostingIn(BaseModel):
     language_req: str | None = None
     url: str | None = None
     posted_at: datetime | None = None
+    expires_at: datetime | None = None      # "Advertised until" / validThrough
     source_detail: str | None = None     # original board when aggregated (indeed.com, ...)
     job_number: str | None = None
     vacancies: int | None = None

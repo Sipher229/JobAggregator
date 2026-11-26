@@ -234,6 +234,10 @@ class JobPosting(TimestampMixin, Base):
     work_mode: Mapped[str | None] = mapped_column(String(32))       # On site / Hybrid / Remote
     match_reason: Mapped[str | None] = mapped_column(String(32))
     details_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)  # "Advertised until"
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # expired | removed (detail page gone) | not_seen (dropped from listings) | outside_boundary
+    closed_reason: Mapped[str | None] = mapped_column(String(32))
 
     match_status: Mapped[MatchStatus] = mapped_column(
         _enum(MatchStatus), default=MatchStatus.UNMATCHED, index=True

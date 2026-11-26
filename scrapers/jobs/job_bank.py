@@ -209,6 +209,7 @@ def parse_posting(html: str) -> dict:
         "province": prop("addressRegion"),
         "postal_code": prop("postalCode"),
         "posted_at": parse_date(prop("datePosted")),
+        "expires_at": parse_date(prop("validThrough")),
         "employment_type": employment_type,
         "employment_term": employment_term,
         "language_req": normalize_language(language),
