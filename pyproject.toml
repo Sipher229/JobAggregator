@@ -1,0 +1,13 @@
+[project]
+name = "immigration-jobs"
+version = "0.1.0"
+description = "Deterministic job aggregator for FCIP/RCIP designated employers"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+browser = ["playwright>=1.44"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
