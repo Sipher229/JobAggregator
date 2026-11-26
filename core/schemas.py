@@ -40,6 +40,9 @@ class EmployerIn(BaseModel):
     website_url: HttpUrl | None = None
     careers_url: HttpUrl | None = None
     priority_sector: str | None = None
+    location: str | None = None
+    not_hiring: bool = False
+    flags: list[str] = []
     source_url: str | None = None
 
 

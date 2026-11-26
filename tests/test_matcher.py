@@ -47,6 +47,25 @@ def test_split_operating_name():
     assert split_operating_name("Plain Name Ltd.") == ("Plain Name Ltd.", None)
 
 
+@pytest.mark.parametrize("raw, expected", [
+    ("3091247 Nova Scotia Limited (Sam’s Pizza, Trenton)", ("3091247 Nova Scotia Limited", "Sam’s Pizza")),
+    ("OSP Restaurant Group Inc (Sam's Pizza - Stellarton)", ("OSP Restaurant Group Inc", "Sam's Pizza")),
+    ("BKR Management Inc. (Burger King)", ("BKR Management Inc.", "Burger King")),
+    ("4563603 Nova Scotia Limited’s (Greco Pizza)", ("4563603 Nova Scotia Limited", "Greco Pizza")),
+    ("Prairie Mountain Health (PMH)", ("Prairie Mountain Health (PMH)", None)),      # not a legal name
+    ("Michelin North America (Canada Inc.)", ("Michelin North America (Canada Inc.)", None)),
+    ("Kal Tire Ltd (KT)", ("Kal Tire Ltd (KT)", None)),                              # too short
+])
+def test_parenthesised_trade_names(raw, expected):
+    assert split_operating_name(raw) == expected
+
+
+def test_trade_name_enables_job_match():
+    cands = [EmployerCandidate.build(7, "Kyle Shaw Enterprises Limited (Tim Hortons)", ["pictou-county"])]
+    r = match_employer("Tim Hortons", "New Glasgow", cands)
+    assert r.is_match and r.employer_id == 7
+
+
 def test_name_variants_and_numbered_companies():
     v = name_variants("1234567 Ontario Inc. o/a Tim Hortons")
     assert v == {"1234567 ontario", "tim hortons"}

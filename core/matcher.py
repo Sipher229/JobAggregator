@@ -80,11 +80,33 @@ def normalize_name(name: str | None) -> str:
     return text
 
 
+# "3091247 Nova Scotia Limited (Sam's Pizza, Trenton)", "BKR Management Inc. (Burger King)"
+_PAREN_TRADE_RE = re.compile(
+    r"^(?P<legal>.+?\b(?:limited|ltd|inc|incorporated|corp|corporation|ltee|limitee|ulc|"
+    r"llp|lp)\.?)(?:'s|’s)?\s*\((?P<trade>[^()]+)\)\s*$",
+    re.IGNORECASE,
+)
+
+
 def split_operating_name(name: str) -> tuple[str, str | None]:
-    """Return (legal_name, operating_name|None) from 'X o/a Y' style strings."""
+    """Return (legal_name, operating_name|None).
+
+    Handles 'X o/a Y' / 'X DBA Y' / 'X faisant affaire sous Y', and a trailing
+    parenthesised trade name after a legal suffix ('X Ltd (Y)'). Parentheses
+    after a non-legal name ('Prairie Mountain Health (PMH)') are left alone.
+    """
     parts = _OPERATING_RE.split(name, maxsplit=1)
     if len(parts) == 2:
         return parts[0].strip(), parts[1].strip()
+    m = _PAREN_TRADE_RE.match(name.strip())
+    if m:
+        trade = m.group("trade").strip()
+        # "Sam's Pizza, Trenton" / "Sam's Pizza - Stellarton": drop a trailing known town
+        tail = re.search(r"\s*(?:,|\s[-–]\s)\s*([^,–-]+)$", trade)
+        if tail and normalize_place(tail.group(1)) in ALL_PLACES:
+            trade = trade[: tail.start()].strip()
+        if not _SUFFIX_RE.search(" " + _basic_clean(trade)) and len(trade) > 3:
+            return m.group("legal").strip(), trade
     return name.strip(), None
 
 
@@ -147,6 +169,7 @@ def _build_place_index() -> dict[str, frozenset[str]]:
 
 
 COMMUNITY_PLACES: dict[str, frozenset[str]] = _build_place_index()
+ALL_PLACES: frozenset[str] = frozenset().union(*COMMUNITY_PLACES.values())
 
 
 def community_for_place(city: str | None, province: str | None = None,
