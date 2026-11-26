@@ -92,7 +92,7 @@ JOB_COLUMNS = [
 EMPLOYER_COLUMNS = [
     "Province", "Community", "Program", "Employer", "Operating Name", "Status", "Priority Sector",
     "Active Jobs", "Jobs Needing Review", "Website", "Careers Page", "ATS",
-    "Careers Page Changed", "First Seen", "Last Seen",
+    "Careers Page Changed", "Website Problem", "First Seen", "Last Seen",
 ]
 SUMMARY_COLUMNS = [
     "Province", "Community", "Program", "Designated Employers", "Hiring", "Not Hiring",
@@ -208,6 +208,7 @@ def build_report(session: Session, flt: ReportFilter) -> Report:
             "Careers Page": employer.careers_url or "",
             "ATS": employer.ats_type or "",
             "Careers Page Changed": "yes" if employer.needs_manual_review else "",
+            "Website Problem": employer.website_error or "",
             "First Seen": _date(employer.first_seen_at),
             "Last Seen": _date(link.last_seen_at),
         })

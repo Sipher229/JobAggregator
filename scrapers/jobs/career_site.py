@@ -332,11 +332,36 @@ class CareerResult:
     jobs: list[JobPostingIn] = field(default_factory=list)
     careers_url: str | None = None
     ats_type: str | None = None
-    tier: str | None = None              # jsonld | ats | hash | None
+    tier: str | None = None              # jsonld | ats | hash | no_careers_page | None
     page_hash: str | None = None
     snapshot: str | None = None
     changed: bool = False
     error: str | None = None
+    error_kind: str | None = None        # see classify_error
+
+
+# Kinds that won't fix themselves: skip the employer until its website changes.
+PERMANENT_ERRORS = {"dns", "robots", "invalid_url"}
+
+
+def classify_error(exc: BaseException | str) -> str:
+    msg = str(exc)
+    status = getattr(exc, "status_code", None)
+    if "robots.txt" in msg:
+        return "robots"
+    if status in (401, 403) or re.search(r"HTTP 40[13]\b", msg):
+        return "blocked"
+    if status in (404, 410) or re.search(r"HTTP 4(04|10)\b", msg):
+        return "not_found"
+    if status == 429 or "HTTP 429" in msg:
+        return "rate_limited"
+    if (status and status >= 500) or re.search(r"HTTP 5\d\d\b", msg):
+        return "server"
+    if re.search(r"getaddrinfo|Name or service not known|nodename nor servname|No address associated", msg):
+        return "dns"
+    if re.search(r"SSL|certificate|CERTIFICATE|TLS|WRONG_VERSION", msg):
+        return "tls"
+    return "network"
 
 
 def _to_job(target: EmployerTarget, raw: dict, ats: str, token: str) -> JobPostingIn:
@@ -362,10 +387,32 @@ class CareerSiteScraper:
 
     def __init__(self, http: HttpClient):
         self.http = http
+        # URL -> error for this run: several designated employers often share a
+        # website (franchise groups), and a blocked site shouldn't be hit repeatedly.
+        self._failed: dict[str, ScrapeError] = {}
+
+    async def _get(self, url: str, **kwargs) -> str:
+        if url in self._failed:
+            raise self._failed[url]
+        try:
+            return await self.http.get_text(url, **kwargs)
+        except ScrapeError as exc:
+            # Some small-business hosts have broken HTTPS (certificate for another
+            # name, legacy TLS, plain HTTP on 443) but serve the site over HTTP.
+            if url.startswith("https://") and classify_error(exc) == "tls":
+                plain = "http://" + url[len("https://"):]
+                try:
+                    text = await self.http.get_text(plain, **kwargs)
+                    logger.info("career_site: %s served over http after TLS failure", plain)
+                    return text
+                except ScrapeError:
+                    pass
+            self._failed[url] = exc
+            raise
 
     async def _ats_jobs(self, target: EmployerTarget, board: AtsBoard) -> list[JobPostingIn]:
         url = ATS_FEEDS[board.ats].format(t=board.token)
-        text = await self.http.get_text(url, headers={"Accept": "application/json, text/html"})
+        text = await self._get(url, headers={"Accept": "application/json, text/html"})
         payload = text if board.ats == "jazzhr" else json.loads(text)
         return [_to_job(target, raw, board.ats, board.token)
                 for raw in parse_ats_feed(board.ats, board.token, payload)]
@@ -377,14 +424,14 @@ class CareerSiteScraper:
             home_html = None
             if not careers_url:
                 if not target.website_url:
-                    result.error = "no website"
+                    result.error, result.error_kind = "no website", "invalid_url"
                     return result
-                home_html = await self.http.get_text(target.website_url)
+                home_html = await self._get(target.website_url)
                 careers_url = find_careers_url(home_html, target.website_url) or target.website_url
             result.careers_url = careers_url
+            dedicated_page = careers_url != target.website_url
 
-            page_html = home_html if careers_url == target.website_url and home_html else \
-                await self.http.get_text(careers_url)
+            page_html = home_html if not dedicated_page and home_html else await self._get(careers_url)
 
             # Tier 1: JSON-LD
             ld = parse_jsonld_jobs(page_html, careers_url)
@@ -409,11 +456,16 @@ class CareerSiteScraper:
                         except (ScrapeError, json.JSONDecodeError, ValueError) as exc:
                             logger.info("career_site: %s feed %s failed: %s", board.ats, board.token, exc)
 
-            # Tier 3: hash
+            # Tier 3: hash -- only a real careers page. A homepage changes with every
+            # news item / promotion, so hashing it would only produce false alerts.
+            if not dedicated_page:
+                result.tier = "no_careers_page"
+                return result
             result.page_hash, result.snapshot = page_fingerprint(page_html)
             result.tier = "hash"
             result.changed = bool(target.careers_page_hash) and result.page_hash != target.careers_page_hash
             return result
         except ScrapeError as exc:
             result.error = str(exc)
+            result.error_kind = classify_error(exc)
             return result

@@ -43,7 +43,8 @@ from core.models import (
     utcnow,
 )
 from scrapers.base import HttpClient, HttpConfig, ScrapeError
-from scrapers.jobs.career_site import CareerSiteScraper, EmployerTarget
+from core.employer_sync import clean_employer_websites
+from scrapers.jobs.career_site import PERMANENT_ERRORS, CareerSiteScraper, EmployerTarget
 from scrapers.jobs.external import EXTERNAL_SOURCES
 from scrapers.jobs.job_bank import JobBankScraper
 
@@ -151,14 +152,22 @@ def career_targets(session: Session, slugs: list[str] | None, limit: int | None)
          .order_by(Employer.careers_checked_at.is_(None).desc(), Employer.careers_checked_at, Employer.id))
     if slugs:
         q = q.where(CommunityRow.slug.in_(slugs))
-    targets = [EmployerTarget(e.id, e.operating_name or e.canonical_name, e.website_url,
-                              e.careers_url, e.careers_page_hash, e.ats_type)
-               for e in session.scalars(q) if counts.get(e.id, 0) == 0]
+    targets = []
+    for e in session.scalars(q):
+        if counts.get(e.id, 0):
+            continue  # already has active matched Job Bank postings
+        if e.website_error and e.website_error.split(":", 1)[0] in PERMANENT_ERRORS:
+            continue  # dead domain / robots refusal: wait until the URL changes
+        targets.append(EmployerTarget(e.id, e.operating_name or e.canonical_name, e.website_url,
+                                      e.careers_url, e.careers_page_hash, e.ats_type))
     return targets[:limit] if limit else targets
 
 
 async def sync_career_sites(session: Session, http: HttpClient, slugs: list[str] | None,
                             opts: JobSyncOptions) -> dict[str, JobSyncStats]:
+    cleaned = clean_employer_websites(session)
+    if any(cleaned.values()):
+        logger.info("career_site: website cleanup %s", cleaned)
     targets = career_targets(session, slugs, opts.career_limit)
     run = _start(session, "sync_jobs:career_site", ",".join(slugs) if slugs else "ALL")
     stats = JobSyncStats()
@@ -172,19 +181,20 @@ async def sync_career_sites(session: Session, http: HttpClient, slugs: list[str]
 
     results = await asyncio.gather(*(one(t) for t in targets))
     index = CandidateIndex(load_candidates(session))
-    jobs, ok_ids, tiers, errors = [], [], {"jsonld": 0, "ats": 0, "hash": 0}, 0
+    jobs, ok_ids, errors = [], [], 0
+    tiers: dict[str, int] = {}
     error_kinds: dict[str, int] = {}
     for res in results:
         emp = session.get(Employer, res.employer_id)
         emp.careers_checked_at = run_started
         if res.error:
             errors += 1
-            kind = (re.search(r"HTTP \d{3}|robots\.txt|[A-Z][a-zA-Z]+Error|Timeout\w*", res.error)
-                    or re.search(r"^\S+", res.error))
-            key = kind.group(0) if kind else "error"
-            error_kinds[key] = error_kinds.get(key, 0) + 1
-            logger.info("career_site %s (%s): %s", emp.canonical_name, emp.website_url, res.error)
+            kind = res.error_kind or "network"
+            error_kinds[kind] = error_kinds.get(kind, 0) + 1
+            emp.website_error = f"{kind}: {res.error}"[:200]
+            logger.info("career_site %s (%s): %s", emp.canonical_name, emp.website_url, emp.website_error)
             continue
+        emp.website_error = None
         ok_ids.append(res.employer_id)
         tiers[res.tier] = tiers.get(res.tier, 0) + 1
         if res.careers_url and not emp.careers_url and res.careers_url != emp.website_url:
@@ -196,6 +206,10 @@ async def sync_career_sites(session: Session, http: HttpClient, slugs: list[str]
                 emp.needs_manual_review = True
             emp.careers_page_hash = res.page_hash
             emp.careers_page_snapshot = res.snapshot
+        elif res.tier == "no_careers_page" and not emp.careers_url:
+            # earlier versions hashed homepages; drop those baselines and their alerts
+            emp.careers_page_hash = emp.careers_page_snapshot = None
+            emp.needs_manual_review = False
         jobs.extend(res.jobs)
 
     upsert_jobs(session, jobs, index, run_started=run_started, stats=stats)
@@ -204,7 +218,8 @@ async def sync_career_sites(session: Session, http: HttpClient, slugs: list[str]
     changed = sum(1 for r in results if r.changed)
     stats.warnings.append(
         f"{len(targets)} employers: jsonld={tiers.get('jsonld', 0)} ats={tiers.get('ats', 0)} "
-        f"hash={tiers.get('hash', 0)} changed={changed} errors={errors}"
+        f"hash={tiers.get('hash', 0)} no_careers_page={tiers.get('no_careers_page', 0)} "
+        f"changed={changed} errors={errors}"
         + (f" ({', '.join(f'{k}: {v}' for k, v in sorted(error_kinds.items(), key=lambda kv: -kv[1]))})"
            if error_kinds else ""))
     _finish(run, stats)

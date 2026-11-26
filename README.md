@@ -127,6 +127,16 @@ with a website and no active matched Job Bank posting:
    Taleo and iCIMS are detected and recorded in `ats_type` only.
 3. SHA-256 of the careers page's main text (boilerplate and numbers removed).
    A change sets `Employer.needs_manual_review`.
+Only a dedicated careers page is hashed; employers whose site has no careers
+link are recorded as `no_careers_page` (homepages change too often to diff).
+Website URLs are cleaned on the way in (`core/urls.py`): Cloudflare
+email-protection links, Facebook/LinkedIn/directory pages and hosts without a
+TLD are rejected; `http//` typos and tracking parameters are fixed.
+Failures are stored in `Employer.website_error` as `<kind>: <detail>` and
+shown in the Employers tab. `dns`, `robots` and `invalid_url` are permanent,
+so those employers are skipped until their website changes. `blocked` (403),
+`rate_limited`, `server`, `tls` and `network` are retried on the next run.
+After an HTTPS certificate or protocol failure, plain `http://` is tried once.
 Career postings must also be located in the employer's community (a national
 chain's Toronto opening is skipped). Postings without a location are marked `needs_review`,
 and duplicates of an active Job Bank posting (same `dedupe_hash`) are skipped.

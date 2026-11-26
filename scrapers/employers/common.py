@@ -12,6 +12,7 @@ from selectolax.lexbor import LexborHTMLParser
 
 from config.communities import Community, EmployerSource, Program
 from core.matcher import strip_accents
+from core.urls import clean_website
 from core.schemas import EmployerIn
 from scrapers.base import BaseScraper, HttpClient, ScrapeError, render_with_browser
 
@@ -177,9 +178,10 @@ def normalize_url(url: str | None, base_url: str | None = None) -> str | None:
 _URL_ADAPTER = TypeAdapter(HttpUrl)
 
 
-def valid_url(url: str | None) -> str | None:
-    """normalize_url + strict validation; invalid URLs are dropped, never the row."""
-    url = normalize_url(url)
+def valid_url(url: str | None, *, exclude_site: str | None = None) -> str | None:
+    """A usable employer website (core.urls.clean_website) that also passes strict
+    URL validation; unusable URLs are dropped, never the row."""
+    url = clean_website(url, exclude_site=exclude_site)
     if not url:
         return None
     try:
@@ -336,8 +338,8 @@ class EmployerScraper(BaseScraper[EmployerIn]):
                         operating_name=r.operating_name,
                         community_slug=self.community.slug,
                         program=program,
-                        website_url=valid_url(r.website_url),
-                        careers_url=valid_url(r.careers_url),
+                        website_url=valid_url(r.website_url, exclude_site=self.resolved_url),
+                        careers_url=valid_url(r.careers_url, exclude_site=self.resolved_url),
                         priority_sector=r.priority_sector,
                         location=r.location,
                         not_hiring=r.not_hiring,

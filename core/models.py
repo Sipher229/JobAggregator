@@ -141,6 +141,10 @@ class Employer(TimestampMixin, Base):
     careers_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ats_type: Mapped[str | None] = mapped_column(String(32))
     needs_manual_review: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # Last career-site failure as "<kind>: <detail>" (kinds: dns, robots, blocked,
+    # not_found, tls, rate_limited, server, network). Cleared on success or when
+    # website_url changes; permanent kinds stop retries until then.
+    website_error: Mapped[str | None] = mapped_column(String(200))
 
     status: Mapped[DesignationStatus] = mapped_column(
         _enum(DesignationStatus), default=DesignationStatus.ACTIVE, index=True

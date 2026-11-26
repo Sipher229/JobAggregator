@@ -88,7 +88,7 @@ def test_details_tracking_and_expiry(seeded_session):
                     jb("2", "Welder", "Dumas Contracting", "Timmins")], index, run_started=now)
     assert needs_detail(s, JobSource.JOB_BANK, ["1", "2", "3"]) == {"2", "3"}
     dumas = s.scalar(select(Employer).where(Employer.normalized_name == "dumas contracting"))
-    assert dumas.website_url == "https://dumas.ca"                      # enriched from posting
+    assert dumas.website_url == "https://dumas.ca/"                     # enriched from posting (normalised)
     # a later listing without detail fields must not wipe stored NOC
     upsert_jobs(s, [jb("1", "Driller", "Dumas Contracting", "Timmins")], index, run_started=now)
     assert s.scalar(select(JobPosting).where(JobPosting.external_id == "1")).noc_code == "73400"

@@ -33,6 +33,7 @@ from core.models import (
     utcnow,
 )
 from core.schemas import EmployerIn
+from core.urls import clean_website
 
 logger = logging.getLogger(__name__)
 
@@ -118,13 +119,42 @@ def upsert_employer(session: Session, index: EmployerIndex, rec: EmployerIn,
         emp.operating_name, emp.normalized_operating_name = operating, norm_op
         index.add(emp)
 
-    # Fill blanks only; never overwrite curated URLs with scraped ones.
-    if rec.website_url and not emp.website_url:
-        emp.website_url = str(rec.website_url)
-    if rec.careers_url and not emp.careers_url:
-        emp.careers_url = str(rec.careers_url)
+    # Fill blanks (or replace unusable values); never overwrite a good URL.
+    set_website(emp, str(rec.website_url) if rec.website_url else None)
+    if rec.careers_url and not clean_website(emp.careers_url):
+        emp.careers_url = clean_website(str(rec.careers_url))
     emp.last_seen_at = utcnow()
     return emp
+
+
+def set_website(emp: Employer, candidate: str | None) -> bool:
+    """Use `candidate` if the employer has no usable website yet. A new URL
+    clears the previous career-site error, so it gets retried."""
+    candidate = clean_website(candidate)
+    if not candidate or clean_website(emp.website_url):
+        return False
+    emp.website_url = candidate
+    emp.website_error = None
+    return True
+
+
+def clean_employer_websites(session: Session) -> dict[str, int]:
+    """Normalise stored website/careers URLs; drop ones that can't be an employer site."""
+    stats = {"fixed": 0, "removed": 0}
+    for emp in session.scalars(select(Employer).where(
+            (Employer.website_url.is_not(None)) | (Employer.careers_url.is_not(None)))):
+        for attr in ("website_url", "careers_url"):
+            old = getattr(emp, attr)
+            if old is None:
+                continue
+            new = clean_website(old)
+            if new != old:
+                setattr(emp, attr, new)
+                stats["removed" if new is None else "fixed"] += 1
+                if attr == "website_url":
+                    emp.website_error = None
+    session.flush()
+    return stats
 
 
 def sync_designations(session: Session, slug: str, program: Program,

@@ -43,6 +43,7 @@ from core.models import (
     MatchStatus,
     utcnow,
 )
+from core.employer_sync import set_website
 from core.schemas import JobPostingIn
 
 logger = logging.getLogger(__name__)
@@ -188,8 +189,7 @@ def upsert_jobs(session: Session, jobs: Iterable[JobPostingIn], index: Candidate
         if result.status == "matched" and job.employer_website:
             emp = employers.get(employer_id) or session.get(Employer, employer_id)
             employers[employer_id] = emp
-            if emp is not None and not emp.website_url:
-                emp.website_url = job.employer_website
+            if emp is not None and set_website(emp, job.employer_website):
                 stats.websites_added += 1
 
     session.flush()
