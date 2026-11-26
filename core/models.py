@@ -223,6 +223,13 @@ class JobPosting(TimestampMixin, Base):
     employment_term: Mapped[str | None] = mapped_column(String(64))  # permanent/seasonal
     language_req: Mapped[str | None] = mapped_column(String(32), index=True)
     url: Mapped[str | None] = mapped_column(String(1024))
+    source_detail: Mapped[str | None] = mapped_column(String(64))   # e.g. "indeed.com" via Job Bank
+    job_number: Mapped[str | None] = mapped_column(String(32))      # Job Bank "Job number"
+    postal_code: Mapped[str | None] = mapped_column(String(10))
+    vacancies: Mapped[int | None] = mapped_column(Integer)
+    work_mode: Mapped[str | None] = mapped_column(String(32))       # On site / Hybrid / Remote
+    match_reason: Mapped[str | None] = mapped_column(String(32))
+    details_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     match_status: Mapped[MatchStatus] = mapped_column(
         _enum(MatchStatus), default=MatchStatus.UNMATCHED, index=True

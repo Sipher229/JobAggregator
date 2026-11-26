@@ -128,21 +128,59 @@ def name_variants(name: str | None, operating_name: str | None = None) -> set[st
     return variants
 
 
-def name_score(a: Iterable[str], b: Iterable[str]) -> float:
-    """Best token_sort_ratio across variant pairs.
+# Words that carry little identity. Two names that agree only on these
+# ("JMH Contracting" / "MWB Contracting") must not match.
+GENERIC_WORDS: frozenset[str] = frozenset("""
+    the of and et de du des la le les a an
+    services service contracting contractors contractor construction constructions trucking
+    transport transportation logistics mechanical electric electrical enterprises enterprise
+    group groupe solutions solution holdings management consulting consultants industries
+    industrial systems technologies technology international partners associates agency
+    corporation town city municipality township county district regional
+    limited ltd inc incorporated co lp llp ltee
+    partnership restaurant restaurants pizza pizzeria sushi grill bar cafe food foods
+    store stores shop
+    canada canadian ontario manitoba saskatchewan alberta columbia british nova scotia
+    brunswick new north northern south east west
+""".split())
 
-    Numbered-company names only count on an exact match: "1234567 ontario" vs
-    "1234568 ontario" would otherwise score ~93.
+CORE_REJECT = 50.0   # distinctive cores this different -> no match at all
+CORE_CAP = 70.0      # cores in [50, 70) -> capped into the review band
+
+
+def distinctive_core(normalized: str) -> str:
+    """Name minus generic words and (when something else remains) place names."""
+    tokens = [t for t in normalized.split() if t not in GENERIC_WORDS]
+    without_places = [t for t in tokens if t not in _PLACE_TOKENS]
+    return " ".join(without_places or tokens)
+
+
+def _pair_score(x: str, y: str) -> float:
+    if is_numbered_company(x) or is_numbered_company(y):
+        return 100.0 if x == y else 0.0
+    if x.replace(" ", "") == y.replace(" ", ""):
+        return 100.0  # "north49 foods" / "north 49 foods", "sb 2" / "sb2"
+    full = fuzz.token_sort_ratio(x, y)
+    cx, cy = distinctive_core(x), distinctive_core(y)
+    if not cx or not cy:
+        return full
+    core = max(fuzz.ratio(cx, cy), fuzz.token_sort_ratio(cx, cy))
+    if core < CORE_REJECT:
+        return min(full, core)
+    if core < CORE_CAP:
+        return min(full, MATCH_THRESHOLD - 5)  # human review, never auto-link
+    return full
+
+
+def name_score(a: Iterable[str], b: Iterable[str]) -> float:
+    """Best pair score across name variants.
+
+    * token_sort_ratio on the normalized names, then
+    * the distinctive cores (generic words / place names removed) must agree too;
+    * numbered-company names only count on an exact match ("1234567 ontario" vs
+      "1234568 ontario" would otherwise score ~93).
     """
-    best = 0.0
-    for x in a:
-        for y in b:
-            if is_numbered_company(x) or is_numbered_company(y):
-                score = 100.0 if x == y else 0.0
-            else:
-                score = fuzz.token_sort_ratio(x, y)
-            best = max(best, score)
-    return best
+    return max((_pair_score(x, y) for x in a for y in b), default=0.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -170,6 +208,7 @@ def _build_place_index() -> dict[str, frozenset[str]]:
 
 COMMUNITY_PLACES: dict[str, frozenset[str]] = _build_place_index()
 ALL_PLACES: frozenset[str] = frozenset().union(*COMMUNITY_PLACES.values())
+_PLACE_TOKENS: frozenset[str] = frozenset(t for p in ALL_PLACES for t in p.split()) - {"saint", "sainte"}
 
 
 def community_for_place(city: str | None, province: str | None = None,

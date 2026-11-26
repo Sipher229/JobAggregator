@@ -90,6 +90,13 @@ class JobPostingIn(BaseModel):
     language_req: str | None = None
     url: str | None = None
     posted_at: datetime | None = None
+    source_detail: str | None = None     # original board when aggregated (indeed.com, ...)
+    job_number: str | None = None
+    vacancies: int | None = None
+    work_mode: str | None = None
+    employer_website: str | None = None  # from the posting, used to enrich Employer
+    employer_id: int | None = None       # known up front for career-site jobs
+    details_fetched: bool = False
 
 
 class JobPostingRead(ORMModel):

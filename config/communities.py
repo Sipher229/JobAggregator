@@ -43,6 +43,10 @@ class EmployerSource:
     program: Program | None = None
     options: dict = field(default_factory=dict)  # parser hints (see scrapers/employers/*)
     requires_js: bool = False       # fetch via Playwright instead of httpx
+    # manual=True: never fetched automatically (site blocks automated access).
+    # The sync parses the newest saved copy at data/manual/<slug>.(html|pdf|json),
+    # refreshed by hand or with `sync-employers -c <slug> --from-file`.
+    manual: bool = False
     notes: str = ""
 
 
@@ -56,11 +60,17 @@ class Community:
     fsa_prefixes: tuple[str, ...] = ()   # postal-code forward sortation areas
     portal_url: str | None = None        # official pilot page
     employer_sources: tuple[EmployerSource, ...] = ()
+    # Job Bank search centres (50 km radius each). Defaults to the first municipality.
+    job_search_cities: tuple[str, ...] = ()
     notes: str = ""
 
     @property
     def is_dual_program(self) -> bool:
         return len(self.programs) > 1
+
+    @property
+    def search_cities(self) -> tuple[str, ...]:
+        return self.job_search_cities or self.municipalities[:1]
 
 
 F, R = Program.FCIP, Program.RCIP
@@ -80,6 +90,7 @@ COMMUNITIES: tuple[Community, ...] = (
             "Hautes-Terres", "Île-de-Lamèque", "Bois-Gagnon", "Inkerman",
             "Pokemouche", "Sainte-Marie-Saint-Raphaël",
         ),
+        job_search_cities=('Caraquet', 'Tracadie', 'Shippagan'),
         portal_url="https://inspirepeninsuleacadienne.ca/programme-pilote-immigration-communautes-francophones/",
         employer_sources=(
             EmployerSource(
@@ -106,6 +117,7 @@ COMMUNITIES: tuple[Community, ...] = (
         programs=(F,),
         municipalities=("Wawa", "Chapleau", "Dubreuilville", "White River", "Hornepayne",
                         "Manitouwadge"),
+        job_search_cities=('Wawa', 'Chapleau', 'White River', 'Hornepayne', 'Manitouwadge'),
         portal_url="https://superioreastcfdc.ca/superioreastcfdc.ca/index.php/fcip",
         employer_sources=(
             EmployerSource(
@@ -122,6 +134,7 @@ COMMUNITIES: tuple[Community, ...] = (
         programs=(F,),
         municipalities=("St-Pierre-Jolys", "Saint-Pierre-Jolys", "St. Pierre Jolys",
                         "De Salaberry", "Saint-Malo", "St. Malo", "Otterburne"),
+        job_search_cities=('St-Pierre-Jolys',),
         portal_url="https://villagestpierrejolys.ca/p/francophone-communities-immigration-pilot-program",
         employer_sources=(
             EmployerSource(
@@ -144,6 +157,7 @@ COMMUNITIES: tuple[Community, ...] = (
         province="BC",
         programs=(F,),
         municipalities=("Kelowna", "West Kelowna", "Lake Country", "Peachland"),
+        job_search_cities=('Kelowna',),
         portal_url="https://www.sdecb.com/en/pilot-program/",
         employer_sources=(
             EmployerSource(
@@ -166,6 +180,7 @@ COMMUNITIES: tuple[Community, ...] = (
             "Falconbridge", "Valley East", "Wahnapitae", "Whitefish",
         ),
         fsa_prefixes=("P3A", "P3B", "P3C", "P3E", "P3G", "P3L", "P3N", "P3P", "P3Y", "P0M"),
+        job_search_cities=('Sudbury',),
         portal_url="https://investsudbury.ca/why-sudbury/newcomers/rcipfcip/",
         employer_sources=tuple(
             EmployerSource(
@@ -178,6 +193,8 @@ COMMUNITIES: tuple[Community, ...] = (
                     "fields": {"name": "h5", "website_url": "h5 a@href", "location": "p"},
                     "group_heading_selector": ".vc_tta-panel-body > h4",
                 },
+                manual=True,
+                notes="Site returns 403 to automated clients; refresh data/manual/sudbury.html by hand.",
             )
             for program in (R, F)
         ),
@@ -194,6 +211,7 @@ COMMUNITIES: tuple[Community, ...] = (
             "Temiskaming Shores", "New Liskeard", "Englehart", "Larder Lake",
         ),
         fsa_prefixes=("P4N", "P4P", "P4R", "P0N"),
+        job_search_cities=('Timmins', 'Kirkland Lake', 'Kapuskasing', 'Hearst', 'Cochrane', 'New Liskeard'),
         portal_url="https://timminsedc.com/immigration/",
         employer_sources=(
             EmployerSource(
@@ -222,6 +240,7 @@ COMMUNITIES: tuple[Community, ...] = (
             "River John", "Pictou Landing", "Thorburn", "Scotsburn", "Abercrombie",
             "Lyons Brook", "Merigomish", "Hopewell", "Durham",
         ),
+        job_search_cities=('New Glasgow',),
         portal_url="https://pcrcip.ca/",
         employer_sources=(
             EmployerSource(
@@ -242,6 +261,7 @@ COMMUNITIES: tuple[Community, ...] = (
             "Bonfield", "Corbeil", "Astorville", "Sturgeon Falls",
         ),
         fsa_prefixes=("P1A", "P1B", "P1C", "P0H"),
+        job_search_cities=('North Bay',),
         portal_url="https://nbrcip.ca/",
         employer_sources=(
             EmployerSource(
@@ -260,6 +280,7 @@ COMMUNITIES: tuple[Community, ...] = (
         programs=(R,),
         municipalities=("Sault Ste. Marie", "Prince Township", "Goulais River", "Echo Bay"),
         fsa_prefixes=("P6A", "P6B", "P6C"),
+        job_search_cities=('Sault Ste. Marie',),
         portal_url="https://welcometossm.com/rcip/",
         employer_sources=(
             EmployerSource(
@@ -282,6 +303,7 @@ COMMUNITIES: tuple[Community, ...] = (
             "Gillies", "Conmee", "Dorion", "Kakabeka Falls", "Murillo", "Rosslyn",
         ),
         fsa_prefixes=("P7A", "P7B", "P7C", "P7E", "P7G", "P7J", "P7K", "P0T"),
+        job_search_cities=('Thunder Bay',),
         portal_url="https://gotothunderbay.ca/immigration/",
         notes="No public list as of 2026-11-26 (old page 404s). Use data/seeds/thunder-bay.csv.",
     ),
@@ -295,6 +317,7 @@ COMMUNITIES: tuple[Community, ...] = (
             "Grunthal", "La Broquerie", "New Bothwell", "Niverville", "Ste. Anne",
         ),
         fsa_prefixes=("R5G", "R0A"),
+        job_search_cities=('Steinbach',),
         portal_url="https://southeastmanitoba.com/rcip/",
         employer_sources=(
             EmployerSource(
@@ -315,6 +338,7 @@ COMMUNITIES: tuple[Community, ...] = (
         programs=(R,),
         municipalities=("Altona", "Rhineland", "Plum Coulee", "Gretna", "Rosenfeld"),
         fsa_prefixes=("R0G",),
+        job_search_cities=('Altona',),
         portal_url="https://ared-rpga.com/immigration/rcip/",
         employer_sources=(
             EmployerSource(
@@ -332,6 +356,7 @@ COMMUNITIES: tuple[Community, ...] = (
         programs=(R,),
         municipalities=("Brandon",),
         fsa_prefixes=("R7A", "R7B", "R7C"),
+        job_search_cities=('Brandon',),
         portal_url="https://economicdevelopmentbrandon.com/rcip/rcip",
         employer_sources=(
             EmployerSource(
@@ -350,6 +375,7 @@ COMMUNITIES: tuple[Community, ...] = (
         municipalities=("Moose Jaw", "Assiniboia", "Gravelbourg", "Chaplin", "Caronport",
                         "Mortlach", "Pense", "Rouleau"),
         fsa_prefixes=("S6H", "S6J", "S6K"),
+        job_search_cities=('Moose Jaw', 'Assiniboia'),
         portal_url="https://rcip.mjchamber.com/",
         employer_sources=(
             EmployerSource(
@@ -371,6 +397,7 @@ COMMUNITIES: tuple[Community, ...] = (
         municipalities=("Claresholm", "Granum", "Stavely", "Willow Creek", "Nanton",
                         "Fort Macleod"),
         fsa_prefixes=("T0L",),
+        job_search_cities=('Claresholm',),
         portal_url="https://www.claresholm.ca/business/labour-resources/rural-community-immigration-pilot",
         employer_sources=(
             EmployerSource(
@@ -395,6 +422,7 @@ COMMUNITIES: tuple[Community, ...] = (
             "Christina Lake",
         ),
         fsa_prefixes=("V1R", "V1N", "V0G", "V1L", "V0B", "V0H"),
+        job_search_cities=('Nelson', 'Trail', 'Castlegar', 'Creston', 'Grand Forks', 'Nakusp'),
         portal_url="https://westkootenayimmigration.ca/",
         employer_sources=(
             EmployerSource(
@@ -419,6 +447,7 @@ COMMUNITIES: tuple[Community, ...] = (
             "Malakwa", "Scotch Creek", "Silver Creek", "Sorrento",
         ),
         fsa_prefixes=("V1B", "V1H", "V1T", "V0E", "V1E"),
+        job_search_cities=('Vernon', 'Salmon Arm'),
         portal_url="https://rcipnorthokanaganshuswap.com/",
         employer_sources=(
             EmployerSource(
@@ -449,6 +478,7 @@ COMMUNITIES: tuple[Community, ...] = (
             "Pouce Coupe", "Taylor", "Hudson's Hope", "Fort Nelson", "Charlie Lake",
         ),
         fsa_prefixes=("V1J", "V1G", "V0C"),
+        job_search_cities=('Fort St. John', 'Dawson Creek', 'Fort Nelson', 'Chetwynd'),
         portal_url="https://www.nebcimmigration.ca/",
         notes="No public list as of 2026-11-26 ('will be posted ... as soon as available'). "
               "Use data/seeds/peace-liard.csv.",

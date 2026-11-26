@@ -66,6 +66,25 @@ def test_trade_name_enables_job_match():
     assert r.is_match and r.employer_id == 7
 
 
+@pytest.mark.parametrize("a, b, lo, hi", [
+    # observed in the 2026-11-26 live run
+    ("JMH Contracting Inc", "MWB Contracting", 0, 74),                 # generic word only
+    ("Sandmere Construction", "Kiani Construction", 0, 74),
+    ("The Corporation of the Town of Cochrane", "Corporation of The City of Timmins", 0, 74),
+    ("A&W Restaurant", "Amanda’s Restaurant", 0, 74),
+    ("Kan Sushi", "Sakura Sushi", 0, 74),
+    ("Ipsos Limited Partnership", "CEDA Limited Partnership", 0, 74),
+    ("ROBERT RUBINO TRUCKING LTD", "Rubino Trucking", 75, 84),         # review band
+    ("NORTH49 FOODS", "North 49 Foods", 100, 100),
+    ("SB 2 Enterprise Ltd.", "SB2 Enterprise Ltd.", 100, 100),
+    ("GFL Environmental Services Inc", "GLF Environmental Services Inc.", 85, 100),
+    ("DARK Enterprise", "1887559 Ontario Inc. o/a Dark Enterprise", 100, 100),
+    ("FHR CONSTRUCTION LTD.", "F.H.R. Construction Ltd", 85, 100),
+])
+def test_distinctive_core_scoring(a, b, lo, hi):
+    assert lo <= name_score(name_variants(a), name_variants(b)) <= hi
+
+
 def test_name_variants_and_numbered_companies():
     v = name_variants("1234567 Ontario Inc. o/a Tim Hortons")
     assert v == {"1234567 ontario", "tim hortons"}

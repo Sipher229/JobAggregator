@@ -6,7 +6,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, replace
+import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -21,7 +22,7 @@ from core.employer_sync import (
 )
 from core.schemas import EmployerIn
 from scrapers.base import HttpClient, HttpConfig
-from scrapers.employers.registry import build_scrapers, scraper_class
+from scrapers.employers.registry import build_scrapers, local_scraper, manual_path
 
 logger = logging.getLogger(__name__)
 TASK_NAME = "sync_employers"
@@ -55,32 +56,24 @@ async def scrape_community(community: Community, http: HttpClient) -> CommunityR
     return CommunityResult(community, records, errors, failed, configured=True)
 
 
-class LocalFileHttp:
-    """Serves one saved file for every request (manual import of a blocked page)."""
-
-    def __init__(self, path: Path):
-        self.path = path
-
-    async def get_text(self, url: str, **kwargs) -> str:
-        return self.path.read_text(encoding="utf-8", errors="replace")
-
-    async def get_bytes(self, url: str, **kwargs) -> bytes:
-        return self.path.read_bytes()
-
-
 async def scrape_community_from_file(community: Community, path: Path) -> CommunityResult:
-    """Run the community's configured (non-CSV) parsers against a locally saved copy."""
-    http = LocalFileHttp(path)
+    """Run the community's configured (non-CSV) parsers against a locally saved copy.
+
+    For `manual` sources the file is also stored as data/manual/<slug>.<ext>, so
+    later automated runs keep using the newest copy.
+    """
     want = SourceType.PDF if path.suffix.lower() == ".pdf" else None
     scrapers = []
     for source in community.employer_sources:
         if source.type is SourceType.CSV or (want and source.type is not want):
             continue
-        opts = {k: v for k, v in source.options.items() if k not in ("link_text", "link_href")}
-        local = replace(source, options=opts, requires_js=False)
-        scraper = scraper_class(community, local)(community, local, http)
-        scraper.resolved_url = source.url  # keep provenance pointing at the official page
-        scrapers.append(scraper)
+        if source.manual:
+            target = manual_path(community.slug, source.type)
+            if target.resolve() != path.resolve():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target)
+                logger.info("%s: saved manual copy to %s", community.slug, target)
+        scrapers.append(local_scraper(community, source, path))
     if not scrapers:
         raise ValueError(f"{community.slug}: no configured parser for {path.name}")
     results = await asyncio.gather(*(s.scrape() for s in scrapers))

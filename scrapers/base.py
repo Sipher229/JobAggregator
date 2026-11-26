@@ -36,19 +36,31 @@ DEFAULT_USER_AGENT = "ImmigrationJobsAggregator/0.1 (+deterministic research cra
 RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
-def _ssl_context() -> ssl.SSLContext | bool:
+def _ssl_context(*, tls13_only: bool = False) -> ssl.SSLContext:
     """Use the OS trust store when available: it completes missing intermediate
     certificates (AIA fetching on Windows), as browsers and curl do. Some
-    municipal sites serve incomplete chains that certifi-only verification rejects."""
+    municipal sites serve incomplete chains that certifi-only verification rejects.
+
+    tls13_only: some hosts (observed: www.jobbank.gc.ca, 2026-11) never answer an
+    OpenSSL ClientHello that offers both TLS 1.2 and 1.3, but complete instantly
+    when only one version is offered. This is a protocol-compatibility setting,
+    not client impersonation."""
     try:
         import truststore
-        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     except ImportError:  # pragma: no cover
-        return True
+        ctx = ssl.create_default_context()
+    if tls13_only:
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    return ctx
 
 
 class ScrapeError(Exception):
     """Raised when a page cannot be fetched or parsed."""
+
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class RobotsDisallowed(ScrapeError):
@@ -63,6 +75,7 @@ class HttpConfig:
     max_attempts: int = 4
     backoff_max: float = 60.0
     respect_robots: bool = True
+    tls13_hosts: frozenset[str] = frozenset({"www.jobbank.gc.ca", "jobbank.gc.ca"})
 
 
 class _RetryableStatus(Exception):
@@ -81,18 +94,24 @@ class HttpClient:
     def __init__(self, config: HttpConfig | None = None, *,
                  transport: httpx.AsyncBaseTransport | None = None):
         self.config = config or HttpConfig()
-        self._client = httpx.AsyncClient(
-            headers={"User-Agent": self.config.user_agent,
-                     "Accept-Language": "en-CA,en;q=0.9,fr-CA;q=0.8"},
-            timeout=self.config.timeout,
-            follow_redirects=True,
-            verify=_ssl_context(),
-            transport=transport,
-        )
+
+        def make(tls13_only: bool) -> httpx.AsyncClient:
+            return httpx.AsyncClient(
+                headers={"User-Agent": self.config.user_agent,
+                         "Accept-Language": "en-CA,en;q=0.9,fr-CA;q=0.8"},
+                timeout=self.config.timeout,
+                follow_redirects=True,
+                verify=_ssl_context(tls13_only=tls13_only),
+                transport=transport,
+            )
+
+        self._client = make(False)
+        self._client_tls13 = make(True)
         self._host_locks: dict[str, asyncio.Lock] = {}
         self._last_request: dict[str, float] = {}
         self._robots: dict[str, Protego | None] = {}
         self._text_cache: dict[str, str] = {}  # same page used by several sources
+        self._crawl_delay: dict[str, float] = {}  # host -> robots.txt Crawl-delay
 
     async def __aenter__(self) -> HttpClient:
         return self
@@ -102,14 +121,20 @@ class HttpClient:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+        await self._client_tls13.aclose()
+
+    def _client_for(self, url: str) -> httpx.AsyncClient:
+        host = urlsplit(url).hostname or ""
+        return self._client_tls13 if host in self.config.tls13_hosts else self._client
 
     # -- politeness -----------------------------------------------------------
     async def _throttle(self, host: str) -> None:
         lock = self._host_locks.setdefault(host, asyncio.Lock())
+        interval = max(self.config.min_interval, self._crawl_delay.get(host, 0.0))
         async with lock:
             elapsed = time.monotonic() - self._last_request.get(host, 0.0)
-            if elapsed < self.config.min_interval:
-                await asyncio.sleep(self.config.min_interval - elapsed)
+            if elapsed < interval:
+                await asyncio.sleep(interval - elapsed)
             self._last_request[host] = time.monotonic()
 
     async def _robots_for(self, url: str) -> Protego | None:
@@ -124,7 +149,7 @@ class HttpClient:
             parser: Protego | None
             try:
                 await self._throttle(parts.netloc)
-                resp = await self._client.get(f"{origin}/robots.txt")
+                resp = await self._client_for(url).get(f"{origin}/robots.txt")
                 if resp.status_code == 200:
                     parser = Protego.parse(resp.text)
                 elif resp.status_code in (401, 403):
@@ -134,6 +159,11 @@ class HttpClient:
             except httpx.HTTPError:
                 parser = None
             self._robots[origin] = parser
+            if parser is not None and self.config.respect_robots:
+                delay = parser.crawl_delay(self.config.user_agent)
+                if delay:
+                    self._crawl_delay[parts.netloc] = min(float(delay), 30.0)
+                    logger.info("%s: honouring Crawl-delay %ss", parts.netloc, delay)
         return self._robots[origin]
 
     async def allowed(self, url: str) -> bool:
@@ -165,7 +195,7 @@ class HttpClient:
             ):
                 with attempt:
                     await self._throttle(host)
-                    resp = await self._client.get(url, **kwargs)
+                    resp = await self._client_for(url).get(url, **kwargs)
                     if resp.status_code in RETRY_STATUS:
                         logger.warning("Retryable %s from %s (attempt %d)",
                                        resp.status_code, url, attempt.retry_state.attempt_number)
@@ -176,11 +206,13 @@ class HttpClient:
             raise ScrapeError(f"{type(exc).__name__} fetching {url}: {exc}") from exc
 
         if resp.status_code >= 400:
-            raise ScrapeError(f"HTTP {resp.status_code} for {url}")
+            raise ScrapeError(f"HTTP {resp.status_code} for {url}", status_code=resp.status_code)
         return resp
 
-    async def get_text(self, url: str, **kwargs) -> str:
-        if kwargs:
+    async def get_text(self, url: str, *, cache: bool = True, **kwargs) -> str:
+        """GET text. Plain GETs are cached per client; pass cache=False for
+        stateful endpoints (e.g. session-based "load more" pagination)."""
+        if kwargs or not cache:
             return (await self.get(url, **kwargs)).text
         if url not in self._text_cache:
             self._text_cache[url] = (await self.get(url)).text

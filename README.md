@@ -43,7 +43,7 @@ ScrapeRun: audit log per task
 
 - [x] Milestone 1 — config, DB, models, schemas, matcher, Alembic, tests
 - [x] Milestone 2 — employer ingestion (`sync-employers`)
-- [ ] Milestone 3 — Job Bank + career-site job aggregation (`sync-jobs`)
+- [x] Milestone 3 — Job Bank + career-site job aggregation (`sync-jobs`)
 - [ ] Milestone 4 — CSV / XLSX / PDF exports and full CLI
 
 ## Employer ingestion
@@ -92,3 +92,55 @@ previously active count. Every run is logged in `scrape_run`.
 Golden tests in `tests/test_employer_fixtures.py` run each parser against the
 real pages saved in `tests/fixtures/employers/` (`python -m tests.fixture_http`
 prints a parse report).
+
+## Job aggregation
+
+```powershell
+python cli.py sync-jobs                               # Job Bank + career sites, all communities
+python cli.py sync-jobs -c timmins -s job_bank --max-details 50
+python cli.py sync-jobs -s career_site --career-limit 100
+python cli.py jobs -c brandon --status matched        # or needs_review / unmatched / all
+```
+
+**Job Bank** (`scrapers/jobs/job_bank.py`): each community's
+`job_search_cities` are searched with a 50 km radius. Paging is session-based,
+so searches run sequentially, and robots.txt asks for `Crawl-delay: 5`, which
+the client honours. A full pass is about 40 searches, roughly 10 minutes. Postings
+Job Bank re-publishes from partner boards (indeed.com, Talent.com, CareerBeacon...)
+are kept with `source_detail` set. Detail pages (NOC, TEER, language,
+full/part time, permanent/seasonal, vacancies, postal code, employer website)
+are fetched only for matched / needs-review postings, once, within
+`--max-details` per run.
+
+**Matching** (`core/matcher.py`): `token_sort_ratio >= 85` and the job's city
+must be inside one of the employer's designated communities. In addition, the
+names' distinctive cores (generic words like "Contracting", "Services",
+"Corporation of the Town of" and place names removed) must agree. Otherwise
+"JMH Contracting" would match "MWB Contracting". Cores that are somewhat similar are
+capped into the review band (75-84), so a person checks them.
+
+**Career sites** (`scrapers/jobs/career_site.py`), for designated employers
+with a website and no active matched Job Bank posting:
+1. JSON-LD `JobPosting`
+2. ATS feeds: Greenhouse, Lever, SmartRecruiters, Workable, Breezy,
+   Recruitee, BambooHR (JSON), JazzHR (HTML). Workday, UKG, Dayforce, ADP,
+   Taleo and iCIMS are detected and recorded in `ats_type` only.
+3. SHA-256 of the careers page's main text (boilerplate and numbers removed).
+   A change sets `Employer.needs_manual_review`.
+Career postings must also be located in the employer's community (a national
+chain's Toronto opening is skipped). Postings without a location are marked `needs_review`,
+and duplicates of an active Job Bank posting (same `dedupe_hash`) are skipped.
+
+**Lifecycle**: postings are upserted on `(source, external_id)`. After a fully
+successful community search, Job Bank postings in that community that weren't
+seen are set `is_active = False`. A failed search centre disables this for that community.
+Expired detail pages (404 / "no longer available") are closed immediately.
+
+**External boards** (`scrapers/jobs/external.py`): Indeed and LinkedIn have no
+public job-search APIs and prohibit scraping. The module is a typed adapter
+interface for licensed feeds, and nothing is registered by default.
+
+**Transport note**: www.jobbank.gc.ca never answers an OpenSSL ClientHello
+offering both TLS 1.2 and 1.3, but connects instantly with TLS 1.3 only.
+`HttpConfig.tls13_hosts` pins that per host. It is a compatibility setting, not
+client impersonation.

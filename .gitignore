@@ -6,3 +6,4 @@ data/*.db*
 exports/*
 !exports/.gitkeep
 .pytest_cache/
+data/*.log
