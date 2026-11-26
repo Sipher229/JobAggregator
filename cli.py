@@ -8,6 +8,7 @@
     python cli.py sync-jobs [--community SLUG ...] [--source job_bank|career_site|external|all]
                             [--max-details N] [--no-details] [--career-limit N]
     python cli.py jobs [--community SLUG] [--status matched|needs_review|unmatched|all]
+    python cli.py rematch
     python cli.py export --format csv|xlsx|pdf [--program FCIP|RCIP|ALL] [--community SLUG]
                          [--lang fr|en|all] [--include-review] [--output-dir DIR]
     python cli.py schedule [--jobs-cron "0 6 * * *"] [--employers-cron "0 4 * * 1"] [--run-now]
@@ -152,6 +153,16 @@ def sync_jobs(
 
 
 @app.command()
+def rematch() -> None:
+    """Re-link stored postings to designated employers (no network; run after sync-employers)."""
+    from core.job_sync import rematch_jobs
+
+    with session_scope() as s:
+        result = rematch_jobs(s)
+    typer.echo(", ".join(f"{k}: {v}" for k, v in result.items()))
+
+
+@app.command()
 def jobs(
     community: Annotated[str | None, typer.Option("--community", "-c")] = None,
     status: Annotated[str, typer.Option(help="matched, needs_review, unmatched or all")] = "matched",
@@ -218,6 +229,28 @@ def export(
         typer.echo(f"wrote {path}")
 
 
+_CRON_DOW = {"0": "sun", "1": "mon", "2": "tue", "3": "wed", "4": "thu", "5": "fri", "6": "sat", "7": "sun"}
+
+
+def cron_trigger(expr: str):
+    """Standard 5-field crontab -> APScheduler CronTrigger.
+
+    APScheduler 3's `CronTrigger.from_crontab` numbers weekdays 0=Monday, unlike
+    cron's 0/7=Sunday, 1=Monday ("0 4 * * 1" would fire on Tuesdays). Numeric
+    day-of-week values are therefore translated to names first.
+    """
+    import re as _re
+
+    from apscheduler.triggers.cron import CronTrigger
+
+    fields = expr.split()
+    if len(fields) != 5:
+        raise typer.BadParameter(f"expected 5 crontab fields, got {expr!r}")
+    minute, hour, day, month, dow = fields
+    dow = _re.sub(r"\d", lambda m: _CRON_DOW[m.group(0)], dow)
+    return CronTrigger(minute=minute, hour=hour, day=day, month=month, day_of_week=dow)
+
+
 @app.command()
 def schedule(
     jobs_cron: Annotated[str, typer.Option(help="Crontab for sync-jobs + export")] = "0 6 * * *",
@@ -225,13 +258,13 @@ def schedule(
     formats: Annotated[str, typer.Option(help="Comma-separated export formats after each job sync")] = "xlsx,pdf",
     max_details: Annotated[int, typer.Option()] = 300,
     run_now: Annotated[bool, typer.Option("--run-now", help="Run both tasks once at startup")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Print the schedule and exit")] = False,
 ) -> None:
     """Run syncs and exports on a schedule (APScheduler, blocking; Ctrl+C to stop).
 
     Defaults: employers every Monday 04:00, jobs + export daily 06:00 (local time).
     """
     from apscheduler.schedulers.blocking import BlockingScheduler
-    from apscheduler.triggers.cron import CronTrigger
 
     from core.exporter import ReportFilter
     from core.exporter import export as run_export
@@ -261,15 +294,17 @@ def schedule(
 
     sched = BlockingScheduler()
     # max_instances=1 + coalesce: a slow run is never started twice concurrently.
-    sched.add_job(employers_task, CronTrigger.from_crontab(employers_cron), id="employers",
+    sched.add_job(employers_task, cron_trigger(employers_cron), id="employers",
                   max_instances=1, coalesce=True, misfire_grace_time=3600)
-    sched.add_job(jobs_task, CronTrigger.from_crontab(jobs_cron), id="jobs",
+    sched.add_job(jobs_task, cron_trigger(jobs_cron), id="jobs",
                   max_instances=1, coalesce=True, misfire_grace_time=3600)
     if run_now:
         employers_task()
         jobs_task()
     for job in sched.get_jobs():
         typer.echo(f"scheduled {job.id}: next run {job.trigger.get_next_fire_time(None, datetime.now(timezone.utc).astimezone())}")
+    if dry_run:
+        return
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):

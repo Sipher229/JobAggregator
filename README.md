@@ -44,7 +44,7 @@ ScrapeRun: audit log per task
 - [x] Milestone 1 — config, DB, models, schemas, matcher, Alembic, tests
 - [x] Milestone 2 — employer ingestion (`sync-employers`)
 - [x] Milestone 3 — Job Bank + career-site job aggregation (`sync-jobs`)
-- [ ] Milestone 4 — CSV / XLSX / PDF exports and full CLI
+- [x] Milestone 4 — CSV / XLSX / PDF exports and full CLI
 
 ## Employer ingestion
 
@@ -144,3 +144,57 @@ interface for licensed feeds, and nothing is registered by default.
 offering both TLS 1.2 and 1.3, but connects instantly with TLS 1.3 only.
 `HttpConfig.tls13_hosts` pins that per host. It is a compatibility setting, not
 client impersonation.
+
+## Reports
+
+```powershell
+python cli.py export                                   # xlsx, everything
+python cli.py export -f csv -f xlsx -f pdf -p FCIP -l fr
+python cli.py export -f pdf -c sudbury --include-review -o C:\reports
+```
+
+| Option | Values |
+|---|---|
+| `--format/-f` | `csv`, `xlsx`, `pdf` (repeatable; default `xlsx`) |
+| `--program/-p` | `FCIP`, `RCIP`, `ALL`: the employer must be designated under it *in the posting's community* |
+| `--community/-c` | community slug (`python cli.py communities`) |
+| `--lang/-l` | `fr` (French, Bilingual, English or French), `en`, `all` |
+| `--include-review` | also include postings whose employer match is borderline |
+
+* **CSV**: active postings, UTF-8 with BOM (accents render in Excel).
+* **XLSX**: *Active Job Postings*, *Designated Employers* (one row per
+  designation, with active-job counts and careers-page change flags), *Summary*
+  (per community × program), *About*. Headers are frozen, columns have filters
+  and fitted widths, and URLs are clickable.
+* **PDF**: landscape report with a summary table, then Province → Community →
+  Employer sections listing each posting's title, NOC/TEER, language, city,
+  source and a link.
+
+Totals count distinct postings. Under a single program, a job at an employer designated under both
+FCIP and RCIP appears in both rows. Language is known only for postings whose Job Bank
+detail page has been fetched (see `--max-details`), so `--lang` filters may
+grow as later runs fill in details.
+
+## Scheduling
+
+```powershell
+python cli.py schedule                       # employers Mon 04:00, jobs + xlsx/pdf export daily 06:00
+python cli.py schedule --jobs-cron "30 7 * * 1-5" --formats xlsx --run-now
+python cli.py schedule --dry-run             # print next run times and exit
+```
+
+`schedule` is a blocking APScheduler process. Cron strings use standard crontab
+weekday numbering (1 = Monday). APScheduler 3's own `from_crontab` treats 0 as Monday, so the CLI
+translates numbers to day names. A run is never started twice at once.
+On Windows you can instead register `python cli.py sync-jobs` and `python cli.py export`
+with Task Scheduler.
+
+## Typical cycle
+
+```powershell
+python cli.py sync-employers     # refresh designations (Sudbury: update data/manual/sudbury.html first)
+python cli.py rematch            # re-link stored postings to the new designations
+python cli.py sync-jobs          # Job Bank + career sites
+python cli.py export -f xlsx -f pdf
+python cli.py status             # recent runs and totals
+```

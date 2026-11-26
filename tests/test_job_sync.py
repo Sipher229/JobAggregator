@@ -95,6 +95,19 @@ def test_details_tracking_and_expiry(seeded_session):
     assert mark_expired(s, JobSource.JOB_BANK, ["2"]) == 1
 
 
+def test_rematch_after_new_designation(seeded_session):
+    from core.job_sync import rematch_jobs
+    s = seeded_session
+    index = seed(s)
+    upsert_jobs(s, [jb("1", "Cook", "Lucky's Diner", "Timmins")], index, run_started=utcnow())
+    assert s.scalar(select(JobPosting)).match_status == MatchStatus.UNMATCHED
+    sync_designations(s, "timmins", Program.RCIP, [emp("Lucky's Diner Inc.", "timmins")], complete=False)
+    result = rematch_jobs(s)
+    assert result["changed"] == 1
+    post = s.scalar(select(JobPosting))
+    assert post.match_status == MatchStatus.MATCHED and post.employer_id
+
+
 def test_career_site_jobs(seeded_session):
     s = seeded_session
     index = seed(s)

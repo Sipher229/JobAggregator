@@ -394,8 +394,8 @@ COMMUNITIES: tuple[Community, ...] = (
         name="Claresholm",
         province="AB",
         programs=(R,),
-        municipalities=("Claresholm", "Granum", "Stavely", "Willow Creek", "Nanton",
-                        "Fort Macleod"),
+        # Pilot boundary: 25 km radius around Claresholm (Fort Macleod / Nanton are outside).
+        municipalities=("Claresholm", "Granum", "Stavely", "Willow Creek"),
         fsa_prefixes=("T0L",),
         job_search_cities=('Claresholm',),
         portal_url="https://www.claresholm.ca/business/labour-resources/rural-community-immigration-pilot",

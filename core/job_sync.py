@@ -247,3 +247,39 @@ def active_job_counts(session: Session) -> dict[int, int]:
 
 def community_slugs() -> list[str]:
     return list(COMMUNITIES_BY_SLUG)
+
+
+def rematch_jobs(session: Session, *, active_only: bool = True) -> dict[str, int]:
+    """Recompute employer links for stored postings (no network).
+
+    Run after `sync-employers` (new / revoked designations) or matcher changes.
+    Career-site postings keep their employer; only their status is re-derived.
+    """
+    index = CandidateIndex(load_candidates(session))
+    community_ids = {c.slug: c.id for c in session.scalars(select(Community))}
+    q = select(JobPosting)
+    if active_only:
+        q = q.where(JobPosting.is_active.is_(True))
+    changed = {"matched": 0, "needs_review": 0, "unmatched": 0, "changed": 0}
+    for post in session.scalars(q):
+        job = JobPostingIn(
+            source=post.source, external_id=post.external_id, title=post.title,
+            employer_name=post.employer_name_raw or "", city=post.city, province=post.province,
+            postal_code=post.postal_code,
+            employer_id=post.employer_id if post.source is JobSource.CAREER_SITE else None,
+        )
+        result = index.match(job)
+        employer_id = result.employer_id if result.status in ("matched", "needs_review") else None
+        if (post.employer_id, post.match_status.value) != (employer_id, result.status):
+            changed["changed"] += 1
+        post.employer_id = employer_id
+        post.match_status = MatchStatus(result.status)
+        post.match_score = round(result.score, 1) if result.score else None
+        post.match_reason = result.reason
+        post.dedupe_hash = dedupe_hash(employer_id, post.title, post.city)
+        post.community_id = community_ids.get(result.community_slug) if result.community_slug else None
+        if post.community_id is None:
+            post.is_active = False  # no longer inside any pilot boundary
+        changed[result.status] += 1
+    session.flush()
+    return changed
